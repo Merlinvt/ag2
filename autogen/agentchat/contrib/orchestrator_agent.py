@@ -250,9 +250,10 @@ class OrchestratorAgent(ConversableAgent):
                     break
                 
                 # Let the speaker generate a response
-                response = next_speaker.initiate_chat(synthesized_prompt, self)
+                response = next_speaker.initiate_chat(recipient=self,message=synthesized_prompt)
 
-                response_summary = response.summary() #TODO: summary or last massage ? 
+                response_summary = response.summary if isinstance(response, ChatResult) else str(response) 
+                #TODO: summary or last massage ? 
                 logger.info(f"Received response from {next_speaker.name}: {response_summary}")
                 # Check for stall or error conditions
                 if self._check_for_stall(response_summary):
@@ -275,7 +276,7 @@ class OrchestratorAgent(ConversableAgent):
                         self._save_successful_state()
                 
         except Exception as e:
-            logger.error(f"Error in orchestrated conversation: {str(e)}")
+            logger.error(f"Error in orchestrated conversation: {str(e)}", exc_info=True)
             self._handle_error_message({
                 "error_type": "system_error",
                 "context": {"error": str(e)}
@@ -487,17 +488,18 @@ class OrchestratorAgent(ConversableAgent):
                 if not response:
                     logger.warning("No valid response received from LLM")
                     return None
-                    
-                response = self._format_json_str(response)
-                # Parse the response content
-                content = response.strip()
-                
-                # More robust JSON extraction
-                json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                if json_match:
-                    content = json_match.group(0)
                 
                 try:
+                    response = self._format_json_str(response)
+                    # Parse the response content
+                    content = response.strip()
+                    
+                    # More robust JSON extraction
+                    json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                    if json_match:
+                        content = json_match.group(0)
+                
+                
                     ledger = json.loads(content)
                     # Add validation here
                     if not self._validate_ledger(ledger):
@@ -528,26 +530,26 @@ class OrchestratorAgent(ConversableAgent):
             except Exception as e:
                 logger.warning(f"Error getting ledger: {e}. Response content: {response if 'response' in locals() else 'No response'}")
                 return None
-            
+
             # Check if we should continue
             if not ledger or not self._should_continue(ledger):
                 if self._return_final_answer:
                     return self  # Let orchestrator give final answer
                 return None  # End the conversation
-            
-            # Get next speaker
-            next_speaker = ledger["next_speaker"]["answer"]
+        
+            # Get next speaker name from ledger
+            next_speaker_name = ledger["next_speaker"]["answer"]
             
             # Find the agent with matching name
             for agent in self.agents:
-                if agent.name == next_speaker:
+                if agent.name == next_speaker_name:
                     self._state["stall_count"] = 0  # Reset stall counter on success
                     return agent
-                    
+                
             # If speaker not found, handle as a stall
             self._state["stall_count"] += 1
-            logger.warning(f"Speaker not found. Stall count: {self._state['stall_count']}")
-                
+            logger.warning(f"Speaker {next_speaker_name} not found. Stall count: {self._state['stall_count']}")
+        
         except Exception as e:
             # Increment stall counter
             self._state["stall_count"] += 1
