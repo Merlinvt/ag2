@@ -17,7 +17,7 @@ from .orchestrator_prompts import (
     ORCHESTRATOR_SYNTHESIZE_PROMPT
 )
 import random
-from autogen.agentchat import Agent, ConversableAgent
+from autogen.agentchat import Agent, ConversableAgent, UserProxyAgent, ChatResult
 import logging
 import re
 
@@ -70,6 +70,8 @@ class OrchestratorAgent(ConversableAgent):
             silent=silent,
         )
 
+        logger.info("Initializing OrchestratorAgent...")
+
         # prompt-based parameters
         self._closed_book_prompt = closed_book_prompt
         self._plan_prompt = plan_prompt
@@ -112,7 +114,7 @@ class OrchestratorAgent(ConversableAgent):
         self._team_description = self._generate_team_description()
         self._return_final_answer = return_final_answer
 
-    def _handle_broadcast_message(self, message: Dict) -> None:
+    def _handle_broadcast_message(self, message: Dict) -> None: # Todo: remove ? 
         """Handle broadcast messages to all agents."""
         logger.info(f"Broadcasting message to all agents: {message.get('content', '')[:100]}...")
         for agent in self.agents:
@@ -190,6 +192,7 @@ class OrchestratorAgent(ConversableAgent):
         # Check for repetitive responses
         last_responses = self._get_last_n_responses(3) # TODO: why 3 ? config ?
         if len(last_responses) >= 3 and all(r == response for r in last_responses): 
+            logger.info("Conversation has stalled due to repetitive responses")
             self._state["stall_count"] += 1
             return True
             
@@ -243,17 +246,43 @@ class OrchestratorAgent(ConversableAgent):
             self.chat_messages.setdefault(self, []).append({"role": "user", "content": synthesized_prompt})
             logger.info(f"agents are {self.agents}")
             logger.info("Agent names: " + ", ".join(agent.name for agent in self.agents))
-            while True:
+            for i in range(5):
+            #while True:
                 # Get next speaker
                 next_speaker = self._select_next_speaker()
                 if next_speaker is None:
                     break
-                
+
+                if next_speaker == self:
+                    # Prepare and return the final answer
+                    final_answer = self._prepare_final_answer()
+                    if final_answer:
+                        self.chat_messages.setdefault(self, []).append({
+                            "role": "assistant",
+                            "content": final_answer,
+                            "name": self.name
+                        })
+                        return final_answer
+                    break
+
+                # For other agents, use executor
+                executor = UserProxyAgent(
+                    name="executor",
+                    llm_config=self.llm_config,
+                    is_termination_msg=lambda x: x.get("content", "").find("TERMINATE") >= 0,
+                    max_consecutive_auto_reply=10,
+                    human_input_mode="NEVER",
+                    description="executor. execute the code written by the coder and report the result. When the task is completed, Return the answer and end your massage with TERMINATE.",
+                    code_execution_config={
+                        "work_dir": "coding",
+                        "use_docker": False,
+                    }
+                )
                 # Let the speaker generate a response
-                response = next_speaker.initiate_chat(recipient=self,message=synthesized_prompt)
+                response = executor.initiate_chat(recipient=next_speaker,message=synthesized_prompt)
 
                 response_summary = response.summary if isinstance(response, ChatResult) else str(response) 
-                #TODO: summary or last massage ? 
+                #TODO: summary or last massage ? # custome last massage with the answer ? 
                 logger.info(f"Received response from {next_speaker.name}: {response_summary}")
                 # Check for stall or error conditions
                 if self._check_for_stall(response_summary):
@@ -504,7 +533,7 @@ class OrchestratorAgent(ConversableAgent):
                     # Add validation here
                     if not self._validate_ledger(ledger):
                         logger.error("Invalid ledger structure")
-                        return self  # Return orchestrator to handle the error
+                        return None  # Return orchestrator to handle the error
                 
                 except json.JSONDecodeError as je:
                     logger.warning(f"JSON decode error: {je}. Attempting to fix malformed JSON...")
@@ -521,10 +550,10 @@ class OrchestratorAgent(ConversableAgent):
                         # Add validation here too
                         if not self._validate_ledger(ledger):
                             logger.error("Invalid ledger structure after cleanup")
-                            return self
+                            return None
                     except json.JSONDecodeError:
                         logger.error(f"Failed to parse ledger after cleanup: {content}")
-                        return self
+                        return None
             
                 logger.info(f"Parsed ledger state: {ledger}")
             except Exception as e:
