@@ -102,7 +102,7 @@ class OrchestratorAgent(ConversableAgent):
         self._last_successful_state = None
         
         # Message type support
-        self._message_handlers = {
+        self._message_handlers = { # TODO: implement ? 
             "broadcast": self._handle_broadcast_message,
             "reset": self._handle_reset_message,
             "error": self._handle_error_message,
@@ -114,7 +114,7 @@ class OrchestratorAgent(ConversableAgent):
         self._team_description = self._generate_team_description()
         self._return_final_answer = return_final_answer
 
-    def _handle_broadcast_message(self, message: Dict) -> None: # Todo: remove ? 
+    def _handle_broadcast_message(self, message: Dict) -> None: # TODO: implement ? 
         """Handle broadcast messages to all agents."""
         logger.info(f"Broadcasting message to all agents: {message.get('content', '')[:100]}...")
         for agent in self.agents:
@@ -254,17 +254,14 @@ class OrchestratorAgent(ConversableAgent):
             )
             
             self.chat_messages.setdefault(self, []).append({"role": "user", "content": synthesized_prompt})
-            logger.info(f"agents are {self.agents}")
-            logger.info("Agent names: " + ", ".join(agent.name for agent in self.agents))
-            for i in range(5):
-            #while True:
-                # Get next speaker
+
+            for i in range(10):
+            #while True: TODO: uncomment once properly tested. Maximum to prevent infinite loop
                 next_speaker = self._select_next_speaker()
                 if next_speaker is None:
                     break
 
                 if next_speaker == self:
-                    # Prepare and return the final answer
                     final_answer = self._prepare_final_answer()
                     if final_answer:
                         self.chat_messages.setdefault(self, []).append({
@@ -293,8 +290,6 @@ class OrchestratorAgent(ConversableAgent):
 
                 response_summary = response.summary if isinstance(response, ChatResult) else str(response) 
                 #TODO: summary or last massage ? # custome last massage with the answer ? 
-                logger.info(f"Received response from {next_speaker.name}: {response_summary}")
-                # Check for stall or error conditions
                 if self._check_for_stall(response_summary):
                     if self._state["stall_count"] >= self._max_stalls_before_replan:
                         self._handle_error_message({"error_type": "conversation_stall"})
@@ -356,12 +351,10 @@ class OrchestratorAgent(ConversableAgent):
                 )}
             ]
         )
-        logger.info(f"Plan creation complete: {plan}")
         return plan
 
     def _update_facts_and_plan(self):
         """Update facts and plan based on current state."""
-        logger.info("Updating facts and plan based on current conversation state")
         # Update facts
         self._state["facts"] = self.generate_reply(
             messages=[{
@@ -372,7 +365,6 @@ class OrchestratorAgent(ConversableAgent):
                 )
             }]
         )
-        logger.info(f"Updated facts: {self._state['facts']}")
 
         # Create replan prompt with current state
         replan_prompt = self._replan_prompt.format(
@@ -390,7 +382,6 @@ class OrchestratorAgent(ConversableAgent):
                 "content": replan_prompt
             }]
         )
-        logger.info(f"Plan update via replan: {self._state['plan']}")
 
     def update_ledger(self) -> Dict[str, Any]:
         """Update and return the ledger state."""
@@ -424,10 +415,8 @@ class OrchestratorAgent(ConversableAgent):
                 response = self.generate_reply(
                     messages=messages
                 )
-                logger.info(f"Ledger response: {response}")
                 
                 ledger = self._clean_and_parse_json(response)
-                logger.info(f"Ledger update: {ledger}")
                 
                 # Validate required fields
                 required_keys = [
@@ -523,7 +512,6 @@ class OrchestratorAgent(ConversableAgent):
                 response = self.generate_reply(
                     messages=messages
                 )
-                logger.info(f"Got ledger response: {response}")
                 
                 try:
                     ledger = self._clean_and_parse_json(response)
@@ -534,16 +522,14 @@ class OrchestratorAgent(ConversableAgent):
                     logger.error(f"Failed to parse ledger: {response}")
                     return None
             
-                logger.info(f"Parsed ledger state: {ledger}")
             except Exception as e:
                 logger.warning(f"Error getting ledger: {e}. Response content: {response if 'response' in locals() else 'No response'}")
                 return None
 
-            # Check if we should continue
             if not ledger or not self._should_continue(ledger):
                 if self._return_final_answer:
                     return self  # Let orchestrator give final answer
-                return None  # End the conversation
+                return None 
         
             # Get next speaker name from ledger
             next_speaker_name = ledger["next_speaker"]["answer"]
@@ -556,7 +542,6 @@ class OrchestratorAgent(ConversableAgent):
                 
             # If speaker not found, handle as a stall
             self._state["stall_count"] += 1
-            logger.warning(f"Speaker {next_speaker_name} not found. Stall count: {self._state['stall_count']}")
         
         except Exception as e:
             # Increment stall counter
@@ -566,7 +551,6 @@ class OrchestratorAgent(ConversableAgent):
             # Check if we should replan
             if self._state["stall_count"] >= self._max_stalls_before_replan:
                 self._state["replan_count"] += 1
-                logger.info(f"Triggering replan. Replan count: {self._state['replan_count']}")
                 
                 # Check if we've exceeded max replans
                 if self._state["replan_count"] > self._max_replans:
