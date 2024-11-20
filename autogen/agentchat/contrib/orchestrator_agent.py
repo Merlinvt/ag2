@@ -18,6 +18,10 @@ from .orchestrator_prompts import (
 )
 import random
 from autogen.agentchat import Agent, ConversableAgent, UserProxyAgent, ChatResult
+from autogen.agentchat.contrib.orchestrator_message_handler import OrchestratorMessageHandler
+from autogen.agentchat.contrib.orchestrator_prompt_handler import OrchestratorPromptHandler
+from autogen.agentchat.contrib.orchestrator_state import OrchestratorState
+
 import logging
 import re
 
@@ -95,120 +99,46 @@ class OrchestratorAgent(ConversableAgent):
             "failed_attempts": [],
         }
 
-        # Error recovery settings
+        # Initialize handlers
+        self._state_manager = OrchestratorState()
+        self._message_handler = OrchestratorMessageHandler(self._state_manager)
+        self._prompt_handler = OrchestratorPromptHandler(self)
+        
+        # Configuration
         self._max_stalls_before_replan = max_stalls_before_replan
         self._max_replans = max_replans
-        self._error_recovery_attempts = 0
-        self._last_successful_state = None
-        
-        # Message type support
-        self._message_handlers = { # TODO: implement ? 
-            "broadcast": self._handle_broadcast_message,
-            "reset": self._handle_reset_message,
-            "error": self._handle_error_message,
-            "progress": self._handle_progress_message,
-        }
-
-        # Task and team state
-        self.agents = agents or []
-        self._team_description = self._generate_team_description()
         self._return_final_answer = return_final_answer
 
-    def _handle_broadcast_message(self, message: Dict) -> None: # TODO: implement ? 
-        """Handle broadcast messages to all agents."""
-        logger.info(f"Broadcasting message to all agents: {message.get('content', '')[:100]}...")
-        for agent in self.agents:
-            if agent != self:
-                agent.receive(message, self)
-
-    def _handle_reset_message(self, message: Dict) -> None:
-        """Handle reset messages to clear state."""
-        logger.info("Resetting orchestrator state...")
-        self._state = {
-            "task": self._state["task"],  # Preserve original task
-            "facts": "",
-            "plan": "",
-            "current_phase": "",
-            "last_speaker": None,
-            "stall_count": 0,
-            "replan_count": 0,
-            "progress_markers": set(),
-            "completed_subtasks": [],
-            "failed_attempts": [],
-        }
-        self._error_recovery_attempts = 0
-        self._last_successful_state = None
-
-    def _handle_error_message(self, message: Dict) -> None:
-        """Handle error messages and trigger recovery if needed."""
-        error_type = message.get("error_type", "unknown")
-        logger.error(f"Received error message: {error_type}")
+        # Team setup
+        self.agents = agents or []
+        self._team_description = self._prompt_handler.generate_team_description(self.agents)
         
-        self._state["failed_attempts"].append({
-            "timestamp": datetime.now().isoformat(),
-            "error_type": error_type,
-            "context": message.get("context", {}),
-        })
-        
-        if self._should_attempt_recovery():
-            self._initiate_error_recovery()
+        # Flag to identify orchestrator
+        self.is_orchestrator = True
 
-    def _handle_progress_message(self, message: Dict) -> None:
-        """Handle progress update messages."""
-        progress = message.get("progress", {})
-        if progress:
-            self._state["progress_markers"].add(progress.get("marker"))
-            if progress.get("completed_subtask"):
-                self._state["completed_subtasks"].append(progress["completed_subtask"])
+    def _handle_error_message(self, error_message: Dict) -> None:
+        """Handle error messages by delegating to message handler."""
+        self._message_handler.handle_error(error_message)
 
     def _should_attempt_recovery(self) -> bool:
         """Determine if error recovery should be attempted."""
         return (
-            self._error_recovery_attempts < 3
-            and self._state["replan_count"] < self._max_replans
+            self._state_manager.error_recovery_attempts < 3
+            and self._state_manager.replan_count < self._max_replans
         )
 
     def _initiate_error_recovery(self) -> None:
         """Initiate error recovery process."""
         logger.info("Initiating error recovery...")
-        self._error_recovery_attempts += 1
+        self._state_manager.increment_error_recovery_attempts()
         
-        if self._last_successful_state:
-            # Restore last known good state
-            self._state.update(self._last_successful_state)
+        if self._state_manager.restore_last_successful_state():
             logger.info("Restored last successful state")
-        
-        # Trigger replanning
-        self._state["replan_count"] += 1
-        self._update_facts_and_plan()
+            self._state_manager.increment_replan_count()
+            self._update_facts_and_plan()
+        else:
+            logger.warning("No successful state to restore")
 
-    def _check_for_stall(self, response: str) -> bool:
-        """Check if the conversation has stalled based on ledger state."""
-        # Empty or whitespace response is considered a stall
-        if not response or response.strip() == "":
-            self._state["stall_count"] += 1
-            return True
-
-        # Get the ledger state
-        ledger = self.update_ledger()
-        if not ledger:
-            self._state["stall_count"] += 1
-            return True
-
-        # Check if progress is being made according to the ledger
-        is_progress = ledger.get("is_progress_being_made", {}).get("answer", False)
-        is_in_loop = ledger.get("is_in_loop", {}).get("answer", False)
-
-        # Stall conditions:
-        # 1. No progress being made
-        # 2. Conversation is in a loop
-        if not is_progress or is_in_loop:
-            self._state["stall_count"] += 1
-            return True
-
-        # Reset stall count if progress is being made
-        self._state["stall_count"] = 0
-        return False
 
     def _get_last_n_responses(self, n: int) -> List[str]:
         """Get the last n responses from the conversation."""
@@ -222,7 +152,7 @@ class OrchestratorAgent(ConversableAgent):
 
     def _save_successful_state(self) -> None:
         """Save current state as last successful state."""
-        self._last_successful_state = self._state.copy()
+        self._state_manager.save_successful_state()
 
     def initiate_chat(self, message: str, sender: Optional[Agent] = None):
         """Start the orchestrated conversation with enhanced error handling."""
@@ -231,22 +161,20 @@ class OrchestratorAgent(ConversableAgent):
         
         try:
             # Initial analysis of the task
-            self._state["facts"] = self._analyze_task(message)
+            self._state["facts"] = self._prompt_handler.analyze_task(message)
             logger.info(f"Task analysis complete. Facts gathered: {self._state['facts']}")
-            
+        
             # Create initial plan
-            self._state["plan"] = self._create_plan()
+            self._state["plan"] = self._prompt_handler.create_plan(self._team_description)
             logger.info(f"Initial plan created: {self._state['plan']}")
             
-            # Save initial state as successful
+            # Save initial state and reset counters
             self._save_successful_state()
-            
-            # Reset counters
-            self._state["replan_count"] = 0
-            self._state["stall_count"] = 0
+            self._state_manager.reset_stall_count()
+            self._state_manager.update_state({"replan_count": 0})
             
             # Create initial synthesis message
-            synthesized_prompt = self._get_synthesize_prompt(
+            synthesized_prompt = self._prompt_handler.get_synthesize_prompt(
                 self._state["task"], 
                 self._team_description, 
                 self._state["facts"], 
@@ -264,6 +192,7 @@ class OrchestratorAgent(ConversableAgent):
                 if next_speaker == self:
                     final_answer = self._prepare_final_answer()
                     if final_answer:
+
                         self.chat_messages.setdefault(self, []).append({
                             "role": "assistant",
                             "content": final_answer,
@@ -288,9 +217,13 @@ class OrchestratorAgent(ConversableAgent):
                 # Let the speaker generate a response
                 response = executor.initiate_chat(recipient=next_speaker,message=synthesized_prompt)
 
-                response_summary = response.summary if isinstance(response, ChatResult) else str(response) 
-                #TODO: summary or last massage ? # custome last massage with the answer ? 
-                if self._check_for_stall(response_summary):
+                response_summary = response.summary if isinstance(response, ChatResult) else str(response)
+                if self._message_handler.check_for_stall(response_summary, self._prompt_handler.update_ledger(
+                    self._state["task"],
+                    self._team_description,
+                    [agent.name for agent in self.agents],
+                    self.chat_messages
+                )):
                     if self._state["stall_count"] >= self._max_stalls_before_replan:
                         self._handle_error_message({"error_type": "conversation_stall"})
                         if not self._should_attempt_recovery():
@@ -316,125 +249,6 @@ class OrchestratorAgent(ConversableAgent):
                 "context": {"error": str(e)}
             })
 
-    def _generate_team_description(self) -> str:
-        """Generate a description of the team's capabilities."""
-        descriptions = []
-        for agent in self.agents:
-            descriptions.append(agent.description)
-        return "\n".join(descriptions)
-
-    def _get_synthesize_prompt(self, task: str, team: str, facts: str, plan: str) -> str:
-        """Create a synthesis prompt combining task, team, facts, and plan."""
-        return self._synthesize_prompt.format(
-            task=task,
-            team=team,
-            facts=facts,
-            plan=plan
-        )
-
-    def _analyze_task(self, task: str) -> str:
-        """Analyze the task using the closed book prompt."""
-        facts = self.generate_reply(
-            messages=[
-                {"role": "system", "content": self._closed_book_prompt.format(task=task)}
-            ]
-        )
-        logger.info(f"Task analysis complete: {facts}")
-        return facts
-
-    def _create_plan(self) -> str:
-        """Create a plan using the plan prompt."""
-        plan = self.generate_reply(
-            messages=[
-                {"role": "system", "content": self._plan_prompt.format(
-                    team_description=self._team_description
-                )}
-            ]
-        )
-        return plan
-
-    def _update_facts_and_plan(self):
-        """Update facts and plan based on current state."""
-        # Update facts
-        self._state["facts"] = self.generate_reply(
-            messages=[{
-                "role": "system",
-                "content": self._update_facts_prompt.format(
-                    task=self._state["task"],
-                    previous_facts=self._state["facts"] if self._state["facts"] else "No previous facts available."
-                )
-            }]
-        )
-
-        # Create replan prompt with current state
-        replan_prompt = self._replan_prompt.format(
-            reason="conversation stalled or in loop",
-            team_description=self._team_description,
-            completed_steps=", ".join(self._state["completed_subtasks"]),
-            failed_attempts=", ".join(f"{attempt['error_type']}" for attempt in self._state["failed_attempts"]),
-            blockers="conversation stalled or in loop"
-        )
-
-        # Get new plan using replan prompt
-        self._state["plan"] = self.generate_reply(
-            messages=[{
-                "role": "system",
-                "content": replan_prompt
-            }]
-        )
-
-    def update_ledger(self) -> Dict[str, Any]:
-        """Update and return the ledger state."""
-        max_retries = 3
-        ledger_prompt = self._ledger_prompt.format(
-            task=self._state["task"],
-            team_description=self._team_description,
-            agent_roles=[agent.name for agent in self.agents]
-        ) 
-
-        for _ in range(max_retries):
-            try:
-                # Create messages array with system prompt and chat history
-                messages = [
-                ]
-                
-                # Add chat messages if they exist
-                if self.chat_messages:
-                    for agent_messages in self.chat_messages.values():
-                        for msg in agent_messages:
-                            if isinstance(msg, dict) and "role" in msg and "content" in msg:
-                                messages.append(msg)
-                
-                # Add ledger prompt as final assistant message
-                messages.append({
-                    "role": "assistant", 
-                    "content": ledger_prompt
-                })
-                
-                # Get ledger state with complete message history
-                response = self.generate_reply(
-                    messages=messages
-                )
-                
-                ledger = self._clean_and_parse_json(response)
-                
-                # Validate required fields
-                required_keys = [
-                    "is_request_satisfied",
-                    "is_in_loop",
-                    "is_progress_being_made",
-                    "next_speaker",
-                    "instruction_or_question"
-                ]
-                
-                if all(key in ledger and "answer" in ledger[key] for key in required_keys):
-                    return ledger
-                    
-            except (json.JSONDecodeError, KeyError) as e:
-                logger.error("An error occurred: %s", e, exc_info=True)
-                continue
-                
-        raise ValueError("Failed to get valid ledger after multiple retries")
 
     def _should_continue(self, ledger: Dict[str, Any]) -> bool:
         """Determine if the conversation should continue based on ledger state."""
@@ -448,7 +262,12 @@ class OrchestratorAgent(ConversableAgent):
             self._state["stall_count"] += 1
             if self._state["stall_count"] >= self._max_stalls_before_replan:
                 if self._state["replan_count"] < self._max_replans:
-                    self._update_facts_and_plan()
+                    new_facts, new_plan = self._prompt_handler.update_facts_and_plan(
+                        self._state,
+                        self._team_description
+                    )
+                    self._state["facts"] = new_facts
+                    self._state["plan"] = new_plan
                     self._state["replan_count"] += 1
                     self._state["stall_count"] = 0
                     
@@ -514,11 +333,14 @@ class OrchestratorAgent(ConversableAgent):
                 )
                 
                 try:
-                    ledger = self._clean_and_parse_json(response)
-                    if not self._validate_ledger(ledger):
+                    ledger = self._prompt_handler._clean_and_parse_json(response)
+                    if not self._prompt_handler._validate_ledger(ledger):
                         logger.error("Invalid ledger structure")
                         return None
+                        self._format_json_str
                 except json.JSONDecodeError:
+                    logger.error(f"Failed to parse ledger: {response}", exc_info=True)
+
                     logger.error(f"Failed to parse ledger: {response}")
                     return None
             
@@ -557,83 +379,4 @@ class OrchestratorAgent(ConversableAgent):
                     logger.warning("Exceeded maximum replans, ending conversation")
                     return None       
         return None  # Default case - end conversation if no speaker found
-    
-    def _clean_and_parse_json(self, content: str) -> Dict:
-        """Clean and parse JSON content with enhanced error handling.
-        
-        Args:
-            content (str): Raw content that may contain JSON
-            
-        Returns:
-            Dict: Parsed JSON dictionary
-            
-        Raises:
-            json.JSONDecodeError: If JSON parsing fails after cleanup attempts
-        """
-        # First try parsing the raw content
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            logger.warning("Initial JSON parse failed, attempting to clean content...")
-            
-            # Extract JSON from markdown if needed
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            else:
-                # Try to find JSON-like content
-                json_match = re.search(r'\{[\s\S]*\}', content)
-                if json_match:
-                    content = json_match.group(0)
-            
-            # Clean the JSON string
-            content = re.sub(r'[\n\r\t]', '', content)  # Remove newlines and tabs
-            content = re.sub(r'\\', '', content)  # Remove escape characters
-            content = re.sub(r',\s*}', '}', content)  # Remove trailing commas
-            content = re.sub(r',\s*]', ']', content)  # Remove trailing commas in arrays
-            content = re.sub(r'(\w+)(?=\s*:)', r'"\1"', content)  # Quote unquoted keys
-            content = content.replace("'", '"')  # Replace single quotes with double quotes
-            
-            # Final attempt to parse
-            return json.loads(content)
-
-    def _validate_ledger(self, ledger: Dict) -> bool:
-        """Validate ledger structure and content with detailed logging.
-        
-        Args:
-            ledger (Dict): The ledger dictionary to validate
-            
-        Returns:
-            bool: True if ledger is valid, False otherwise
-        """
-        required_keys = [
-            "is_request_satisfied",
-            "is_in_loop",
-            "is_progress_being_made",
-            "next_speaker",
-            "instruction_or_question"
-        ]
-        
-        if not isinstance(ledger, dict):
-            logger.error(f"Ledger must be a dictionary, got {type(ledger)}")
-            return False
-        
-        for key in required_keys:
-            if key not in ledger:
-                logger.error(f"Missing required key '{key}' in ledger")
-                return False
-            
-            if not isinstance(ledger[key], dict):
-                logger.error(f"Value for '{key}' must be a dictionary, got {type(ledger[key])}")
-                return False
-            
-            for subfield in ["answer", "reason"]:
-                if subfield not in ledger[key]:
-                    logger.error(f"Missing required subfield '{subfield}' in ledger['{key}']")
-                    return False
-            
-
-        
-
-        return True
-    
     
