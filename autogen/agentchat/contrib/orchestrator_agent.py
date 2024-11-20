@@ -183,20 +183,30 @@ class OrchestratorAgent(ConversableAgent):
         self._update_facts_and_plan()
 
     def _check_for_stall(self, response: str) -> bool:
-        """Check if the conversation has stalled."""
-        # Check for lack of progress
+        """Check if the conversation has stalled based on ledger state."""
+        # Empty or whitespace response is considered a stall
         if not response or response.strip() == "":
             self._state["stall_count"] += 1
             return True
-            
-        # Check for repetitive responses
-        last_responses = self._get_last_n_responses(3) # TODO: why 3 ? config ?
-        if len(last_responses) >= 3 and all(r == response for r in last_responses): 
-            logger.info("Conversation has stalled due to repetitive responses")
+
+        # Get the ledger state
+        ledger = self.update_ledger()
+        if not ledger:
             self._state["stall_count"] += 1
             return True
-            
-        # Reset stall count if progress is detected
+
+        # Check if progress is being made according to the ledger
+        is_progress = ledger.get("is_progress_being_made", {}).get("answer", False)
+        is_in_loop = ledger.get("is_in_loop", {}).get("answer", False)
+
+        # Stall conditions:
+        # 1. No progress being made
+        # 2. Conversation is in a loop
+        if not is_progress or is_in_loop:
+            self._state["stall_count"] += 1
+            return True
+
+        # Reset stall count if progress is being made
         self._state["stall_count"] = 0
         return False
 
