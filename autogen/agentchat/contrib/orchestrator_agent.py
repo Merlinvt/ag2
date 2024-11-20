@@ -417,16 +417,16 @@ class OrchestratorAgent(ConversableAgent):
                 # Add ledger prompt as final assistant message
                 messages.append({
                     "role": "assistant", 
-                    "content": self._ledger_prompt.format(
-                        task=self._state["task"],
-                        team_description=self._team_description,
-                        agent_roles=[agent.name for agent in self.agents]
-                    )
+                    "content": ledger_prompt
                 })
                 
-                response = self.generate_reply(messages)
+                # Get ledger state with complete message history
+                response = self.generate_reply(
+                    messages=messages
+                )
+                logger.info(f"Ledger response: {response}")
                 
-                ledger = json.loads(response)
+                ledger = self._clean_and_parse_json(response)
                 logger.info(f"Ledger update: {ledger}")
                 
                 # Validate required fields
@@ -441,7 +441,8 @@ class OrchestratorAgent(ConversableAgent):
                 if all(key in ledger and "answer" in ledger[key] for key in required_keys):
                     return ledger
                     
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.error("An error occurred: %s", e, exc_info=True)
                 continue
                 
         raise ValueError("Failed to get valid ledger after multiple retries")
@@ -524,46 +525,14 @@ class OrchestratorAgent(ConversableAgent):
                 )
                 logger.info(f"Got ledger response: {response}")
                 
-                if not response:
-                    logger.warning("No valid response received from LLM")
-                    return None
-                
                 try:
-                    response = self._format_json_str(response)
-                    # Parse the response content
-                    content = response.strip()
-                    
-                    # More robust JSON extraction
-                    json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                    if json_match:
-                        content = json_match.group(0)
-                
-                
-                    ledger = json.loads(content)
-                    # Add validation here
+                    ledger = self._clean_and_parse_json(response)
                     if not self._validate_ledger(ledger):
                         logger.error("Invalid ledger structure")
-                        return None  # Return orchestrator to handle the error
-                
-                except json.JSONDecodeError as je:
-                    logger.warning(f"JSON decode error: {je}. Attempting to fix malformed JSON...")
-                    # Enhanced JSON cleaning
-                    content = re.sub(r'[\n\r\t]', '', content)  # Remove newlines and tabs
-                    content = re.sub(r'\\', '', content)  # Remove escape characters
-                    content = re.sub(r',\s*}', '}', content)  # Remove trailing commas
-                    content = re.sub(r',\s*]', ']', content)  # Remove trailing commas in arrays
-                    content = re.sub(r'(\w+)(?=\s*:)', r'"\1"', content)  # Quote unquoted keys
-                    content = content.replace("'", '"')  # Replace single quotes with double quotes
-                    
-                    try:
-                        ledger = json.loads(content)
-                        # Add validation here too
-                        if not self._validate_ledger(ledger):
-                            logger.error("Invalid ledger structure after cleanup")
-                            return None
-                    except json.JSONDecodeError:
-                        logger.error(f"Failed to parse ledger after cleanup: {content}")
                         return None
+                except json.JSONDecodeError:
+                    logger.error(f"Failed to parse ledger: {response}")
+                    return None
             
                 logger.info(f"Parsed ledger state: {ledger}")
             except Exception as e:
@@ -605,6 +574,44 @@ class OrchestratorAgent(ConversableAgent):
                     return None       
         return None  # Default case - end conversation if no speaker found
     
+    def _clean_and_parse_json(self, content: str) -> Dict:
+        """Clean and parse JSON content with enhanced error handling.
+        
+        Args:
+            content (str): Raw content that may contain JSON
+            
+        Returns:
+            Dict: Parsed JSON dictionary
+            
+        Raises:
+            json.JSONDecodeError: If JSON parsing fails after cleanup attempts
+        """
+        # First try parsing the raw content
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning("Initial JSON parse failed, attempting to clean content...")
+            
+            # Extract JSON from markdown if needed
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            else:
+                # Try to find JSON-like content
+                json_match = re.search(r'\{[\s\S]*\}', content)
+                if json_match:
+                    content = json_match.group(0)
+            
+            # Clean the JSON string
+            content = re.sub(r'[\n\r\t]', '', content)  # Remove newlines and tabs
+            content = re.sub(r'\\', '', content)  # Remove escape characters
+            content = re.sub(r',\s*}', '}', content)  # Remove trailing commas
+            content = re.sub(r',\s*]', ']', content)  # Remove trailing commas in arrays
+            content = re.sub(r'(\w+)(?=\s*:)', r'"\1"', content)  # Quote unquoted keys
+            content = content.replace("'", '"')  # Replace single quotes with double quotes
+            
+            # Final attempt to parse
+            return json.loads(content)
+
     def _validate_ledger(self, ledger: Dict) -> bool:
         """Validate ledger structure and content with detailed logging.
         
