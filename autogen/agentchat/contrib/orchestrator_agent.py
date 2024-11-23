@@ -1,6 +1,7 @@
 import json
 import logging
 import traceback
+import re
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
@@ -16,6 +17,7 @@ from .orchestrator_prompts import (
     ORCHESTRATOR_REPLAN_PROMPT,
     ORCHESTRATOR_SYNTHESIZE_PROMPT
 )
+
 
 from autogen.agentchat import Agent, ConversableAgent, UserProxyAgent, ChatResult
 
@@ -121,23 +123,35 @@ class OrchestratorAgent(ConversableAgent):
         self._facts = ""
         self._plan = ""
 
-    def _get_closed_book_prompt(self, task: str) -> str:
-        return self._closed_book_prompt.format(task=task)
-
     def _get_plan_prompt(self, team: str) -> str:
-        return self._plan_prompt.format(team=team)
+        return self._plan_prompt.format(team_description=team)  
 
     def _get_synthesize_prompt(self, task: str, team: str, facts: str, plan: str) -> str:
-        return self._synthesize_prompt.format(task=task, team=team, facts=facts, plan=plan)
-
+        return self._synthesize_prompt.format(
+            task=task, 
+            team=team, 
+            facts=facts, 
+            plan=plan
+        )  
     def _get_ledger_prompt(self, task: str, team: str, names: List[str]) -> str:
-        return self._ledger_prompt.format(task=task, team=team, names=names)
+        return self._ledger_prompt.format(
+            task=task, 
+            team_description=team,  # Changed from 'team' to 'team_description'
+            agent_roles=names  # Changed from 'names' to 'agent_roles'
+        )
 
     def _get_update_facts_prompt(self, task: str, facts: str) -> str:
-        return self._update_facts_prompt.format(task=task, facts=facts)
+        return self._update_facts_prompt.format(
+            task=task, 
+            previous_facts=facts  # Changed from 'facts' to 'previous_facts'
+        )
 
     def _get_update_plan_prompt(self, team: str) -> str:
-        return self._update_plan_prompt.format(team=team)
+        return self._update_plan_prompt.format(team_description=team)  # Changed from 'team' to 'team_description'
+
+
+    def _get_closed_book_prompt(self, task: str) -> str:
+        return self._closed_book_prompt.format(task=task)
 
     def _get_team_description(self) -> str:
         """Generate a description of the team's capabilities."""
@@ -239,7 +253,8 @@ class OrchestratorAgent(ConversableAgent):
 
             try:
                 assert isinstance(ledger_str, str)
-                ledger_dict: Dict[str, Any] = json.loads(ledger_str)
+                ledger_dict: Dict[str, Any] = self._clean_and_parse_json(ledger_str)
+
                 required_keys = [
                     "is_request_satisfied",
                     "is_in_loop",
@@ -480,3 +495,51 @@ class OrchestratorAgent(ConversableAgent):
             logger.info(f"Final state: {final_state}")
             # Return chat result with all relevant info
             return self._oai_messages[self][-1]["content"]
+
+
+    def _clean_and_parse_json(self, content: str) -> Dict[str, Any]:
+        """Clean and parse JSON content from various formats."""
+        if not content or not isinstance(content, str):
+            raise ValueError("Content must be a non-empty string")
+
+        # Extract JSON from markdown code blocks if present
+        if "```json" in content:
+            parts = content.split("```json")
+            if len(parts) > 1:
+                content = parts[1].split("```")[0].strip()
+        elif "```" in content:  # Handle cases where json block might not be explicitly marked
+            parts = content.split("```")
+            if len(parts) > 1:
+                content = parts[1].strip()  # Take first code block content
+        
+        # Find JSON-like structure if not in code block
+        if not content.strip().startswith('{'):
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if not json_match:
+                raise ValueError(f"No JSON structure found in content: {content}")
+            content = json_match.group(0)
+
+        # Preserve newlines for readability in error messages
+        formatted_content = content
+        
+        # Now clean for parsing
+        try:
+            # First try parsing the cleaned but formatted content
+            return json.loads(formatted_content)
+        except json.JSONDecodeError:
+            # If that fails, try more aggressive cleaning
+            cleaned_content = re.sub(r'[\n\r\t]', ' ', content)  # Replace newlines/tabs with spaces
+            cleaned_content = re.sub(r'\s+', ' ', cleaned_content)  # Normalize whitespace
+            cleaned_content = re.sub(r'\\(?!["\\/bfnrt])', '', cleaned_content)  # Remove invalid escapes
+            cleaned_content = re.sub(r',(\s*[}\]])', r'\1', cleaned_content)  # Remove trailing commas
+            cleaned_content = re.sub(r'([{,]\s*)(\w+)(?=\s*:)', r'\1"\2"', cleaned_content)  # Quote unquoted keys
+            cleaned_content = cleaned_content.replace("'", '"')  # Standardize quotes
+            
+            try:
+                return json.loads(cleaned_content)
+            except json.JSONDecodeError as e:
+                logger.error(f"Original content:\n{formatted_content}")
+                logger.error(f"Cleaned content:\n{cleaned_content}")
+                logger.error(f"JSON error: {str(e)}")
+                raise ValueError(f"Failed to parse JSON after cleaning. Error: {str(e)}")
+
