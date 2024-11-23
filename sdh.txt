@@ -1,0 +1,32 @@
+#equivalent appart from init chat with other agent instead of generate reply
+use autogen chat massage format
+handle final answer
+fix init chat
+
+The Orchestrator operates in two main loops:
+
+Outer Loop (Task Ledger):
+Receives the initial task
+Creates/updates a Task Ledger containing:
+Given or verified facts
+Facts that need to be looked up
+Facts that need to be derived through computation/logic
+Educated guesses
+A task plan
+Inner Loop (Progress Ledger):
+Maintains a Progress Ledger to track:
+Whether the task is complete
+If there are unproductive loops
+If progress is being made
+Which agent should act next
+Instructions for the next agent
+The Orchestrator's decision flow:
+
+Checks if task is complete - if yes, reports final answer
+If not complete, checks if progress is being made
+If progress is being made, continues with the current plan
+If no progress is made, checks a "stall count"
+If stall count exceeds 2, returns to update the Task Ledger
+Otherwise, continues directing other agents (Coder, ComputerTerminal, WebSurfer, FileSurfer) to execute subtasks
+
+         

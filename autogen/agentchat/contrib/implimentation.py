@@ -1,3 +1,26 @@
+from typing import Any, Dict, List, Optional, Union, Literal
+import json
+import logging
+import time
+import traceback
+from autogen.agentchat import (
+    Agent, 
+    ConversableAgent,
+    GroupChat,
+    GroupChatManager,
+    AgentProxy,
+    UserMessage,
+    AssistantMessage,
+    BroadcastMessage,
+    ResetMessage,
+    RequestReplyMessage,
+    MessageContext,
+    TopicId,
+    OrchestrationEvent,
+)
+from autogen.agentchat.utils import message_content_to_str
+from autogen.core.base import CancellationToken
+
 from .orchestrator_prompts import (
     ORCHESTRATOR_SYSTEM_MESSAGE,
     ORCHESTRATOR_CLOSED_BOOK_PROMPT,
@@ -10,31 +33,20 @@ from .orchestrator_prompts import (
     ORCHESTRATOR_SYNTHESIZE_PROMPT
 )
 
-
-from autogen.agentchat import Agent, ConversableAgent, UserProxyAgent, ChatResult
-
-import logging
-
 logger = logging.getLogger(__name__)
 
 
-class OrchestratorAgent(ConversableAgent):
-    DEFAULT_SYSTEM_MESSAGES = [
-        {"role": "system", "content": ORCHESTRATOR_SYSTEM_MESSAGE}
-    ]
-
+class OrchestratorGroupChat(GroupChat):
+    """A GroupChat subclass that implements the orchestrator functionality using GroupChat's built-in mechanisms"""
+    
     def __init__(
         self,
-        name: str,
-        is_termination_msg: Optional[Callable[[Dict], bool]] = None,
-        max_consecutive_auto_reply: Optional[int] = None,
-        human_input_mode: Literal["ALWAYS", "NEVER", "TERMINATE"] = "TERMINATE",
-        function_map: Optional[Dict[str, Callable]] = None,
-        code_execution_config: Union[Dict, Literal[False]] = False,
-        llm_config: Optional[Union[Dict, Literal[False]]] = None,
-        default_auto_reply: Union[str, Dict] = "",
-        description: Optional[str] = None,
-        system_messages: List[Dict] = DEFAULT_SYSTEM_MESSAGES,
+        agents: List[Agent],
+        messages: List[Dict],
+        max_round: int = 20,
+        admin_name: str = "Admin",
+        func_call_filter: bool = True,
+        system_messages: List[Dict] = [{"role": "system", "content": ORCHESTRATOR_SYSTEM_MESSAGE}],
         closed_book_prompt: str = ORCHESTRATOR_CLOSED_BOOK_PROMPT,
         plan_prompt: str = ORCHESTRATOR_PLAN_PROMPT,
         synthesize_prompt: str = ORCHESTRATOR_SYNTHESIZE_PROMPT,
@@ -42,28 +54,16 @@ class OrchestratorAgent(ConversableAgent):
         update_facts_prompt: str = ORCHESTRATOR_UPDATE_FACTS_PROMPT,
         update_plan_prompt: str = ORCHESTRATOR_UPDATE_PLAN_PROMPT,
         replan_prompt: str = ORCHESTRATOR_REPLAN_PROMPT,
-        chat_messages: Optional[Dict[Agent, List[Dict]]] = None,
-        silent: Optional[bool] = None,
-        agents: Optional[List[Agent]] = None,
-        max_rounds: int = 20, # TODO: nessisary?
         max_stalls_before_replan: int = 3,
         max_replans: int = 3,
         return_final_answer: bool = False,
-        **kwargs
     ):
         super().__init__(
-            name=name,
-            system_message=system_messages[0]["content"],
-            is_termination_msg=is_termination_msg,
-            max_consecutive_auto_reply=max_consecutive_auto_reply,
-            human_input_mode=human_input_mode,
-            function_map=function_map,
-            code_execution_config=code_execution_config,
-            llm_config=llm_config,
-            default_auto_reply=default_auto_reply,
-            description=description,
-            chat_messages=chat_messages,
-            silent=silent,
+            agents=agents,
+            messages=messages,
+            max_round=max_round,
+            admin_name=admin_name,
+            func_call_filter=func_call_filter
         )
 
         self._system_messages = system_messages
@@ -73,17 +73,16 @@ class OrchestratorAgent(ConversableAgent):
         self._ledger_prompt = ledger_prompt
         self._update_facts_prompt = update_facts_prompt
         self._update_plan_prompt = update_plan_prompt
+        self._replan_prompt = replan_prompt
 
-        self._chat_history: chat_messages # fix default
-        self._agents = agents
-        self._should_replan = True
         self._max_stalls_before_replan = max_stalls_before_replan
         self._stall_counter = 0
         self._max_replans = max_replans
         self._replan_counter = 0
         self._return_final_answer = return_final_answer
 
-        self._team_description = ""
+        # State tracking
+        self._team_description = self._get_team_description()
         self._task = ""
         self._facts = ""
         self._plan = ""
@@ -116,7 +115,7 @@ class OrchestratorAgent(ConversableAgent):
     def _get_team_names(self) -> List[str]:
         return [agent.name for agent in self._agents]
 
-    def _initialize_task(self, task: str) -> None:
+    async def _initialize_task(self, task: str, cancellation_token: Optional[CancellationToken] = None) -> None:
         # called the first time a task is received
         self._task = task
         self._team_description = self._get_team_description()
@@ -130,14 +129,15 @@ class OrchestratorAgent(ConversableAgent):
             {"role": "user", "content": self._get_closed_book_prompt(self._task)}
         )
         response = await self.generate_reply(
-            self._system_messages + planning_conversation
+            self._system_messages + planning_conversation,
+            cancellation_token=cancellation_token
         )
 
         assert isinstance(response, str)
         self._facts = response
         planning_conversation.append(
             {"role": "assistant", "content": self._facts}
-            )
+        )
 
         # 2. CREATE A PLAN
         ## plan based on available information
@@ -145,14 +145,15 @@ class OrchestratorAgent(ConversableAgent):
             {"role": "user", "content": self._get_plan_prompt(self._team_description)}
         )
         response = await self.generate_reply(
-            self._system_messages + planning_conversation
+            self._system_messages + planning_conversation,
+            cancellation_token=cancellation_token
         )
 
-        assert isinstance(response.content, str)
+        assert isinstance(response, str)
         self._plan = response
 
 
-    def _update_facts_and_plan(self, cancellation_token: Optional[CancellationToken] = None) -> None:
+    async def _update_facts_and_plan(self, cancellation_token: Optional[CancellationToken] = None) -> None:
         # called when the orchestrator decides to replan
 
         # Shallow-copy the conversation
@@ -162,8 +163,9 @@ class OrchestratorAgent(ConversableAgent):
         planning_conversation.append(
             {"role": "user", "content": self._get_update_facts_prompt(self._task, self._facts)}
         )
-        response = self.generate_reply(
-            self._system_messages + planning_conversation
+        response = await self.generate_reply(
+            self._system_messages + planning_conversation,
+            cancellation_token=cancellation_token
         )
 
         assert isinstance(response, str)
@@ -176,8 +178,9 @@ class OrchestratorAgent(ConversableAgent):
         planning_conversation.append(
             {"role": "user", "content": self._get_update_plan_prompt(self._team_description)}
         )
-        response = self.generate_reply(
-            self._system_messages + planning_conversation
+        response = await self.generate_reply(
+            self._system_messages + planning_conversation,
+            cancellation_token=cancellation_token
         )
 
         assert isinstance(response, str)
@@ -249,7 +252,7 @@ class OrchestratorAgent(ConversableAgent):
 
         raise ValueError("Failed to parse ledger information after multiple retries.")
 
-    def _prepare_final_answer(self) -> str:
+    async def _prepare_final_answer(self) -> str:
         # called when the task is complete
 
         final_message = {"role": "user", "content": ORCHESTRATOR_GET_FINAL_ANSWER.format(task=self._task)}
@@ -262,13 +265,15 @@ class OrchestratorAgent(ConversableAgent):
 
 
     async def _select_next_agent(
-        self, task: str
+        self,
+        task: str,
+        cancellation_token: Optional[CancellationToken] = None
     ) -> Optional[AgentProxy]:
         # the main orchestrator loop
         # Check if the task is still unset, in which case this message contains the task string
         
         if len(self._task) == 0:
-            await self._initialize_task(task)
+            await self._initialize_task(task, cancellation_token=cancellation_token)
 
             # At this point the task, plan and facts shouls all be set
             assert len(self._task) > 0
@@ -300,10 +305,10 @@ class OrchestratorAgent(ConversableAgent):
             self._chat_history.append(synthesized_message)
 
             # Answer from this synthesized message
-            return self._select_next_agent(synthesized_message)
+            return await self._select_next_agent(synthesized_message, cancellation_token)
 
         # Orchestrate the next step
-        ledger_dict = self.update_ledger()
+        ledger_dict = await self.update_ledger()
         self.logger.info(
                 f"Updated Ledger:\n{json.dumps(ledger_dict, indent=2)}"
         )
