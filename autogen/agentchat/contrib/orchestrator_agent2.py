@@ -47,7 +47,7 @@ class OrchestratorAgent(ConversableAgent):
         replan_prompt: str = ORCHESTRATOR_REPLAN_PROMPT,
         chat_messages: Optional[Dict[Agent, List[Dict]]] = None,
         silent: Optional[bool] = None,
-        agents: Optional[List[Agent]] = [],
+        agents: Optional[List[ConversableAgent]] = [],
         max_rounds: int = 20, 
         max_stalls_before_replan: int = 3,
         max_replans: int = 3,
@@ -271,7 +271,7 @@ class OrchestratorAgent(ConversableAgent):
         return response
 
 
-    async def _select_next_agent(self, message: Union[str, Dict[str, str]]) -> Optional[Agent]:
+    async def _select_next_agent(self, message: Union[str, Dict[str, str]]) -> Optional[ConversableAgent]:
         """Select the next agent to act based on the current state."""
         task = message if isinstance(message, str) else message["content"]
         if len(self._task) == 0:
@@ -358,7 +358,7 @@ class OrchestratorAgent(ConversableAgent):
                     
                     # Reset all agents
                     for agent in self._agents:
-                        await agent.a_reset()
+                        await agent.reset()
                     # Send everyone the NEW plan
                     synthesized_prompt = self._get_synthesize_prompt(
                         self._task, self._team_description, self._facts, self._plan
@@ -408,7 +408,7 @@ class OrchestratorAgent(ConversableAgent):
         if clear_history:
             self._oai_messages.clear()
             for agent in self._agents:
-                await agent.a_reset()
+                agent.reset()
             
         if message is None:
             message = await self.a_get_human_input("Please provide the task: ")
