@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 class OrchestratorAgent(ConversableAgent):
-    DEFAULT_SUMMARY_METHOD = "last_msg"
     DEFAULT_SYSTEM_MESSAGES = [
         {"role": "system", "content": ORCHESTRATOR_SYSTEM_MESSAGE}
     ]
@@ -292,12 +291,17 @@ class OrchestratorAgent(ConversableAgent):
         return response
 
 
-    def _select_next_agent(self, message: Union[str, Dict[str, str]]) -> Optional[ConversableAgent]:
+    def _select_next_agent(self, message: Union[Dict[str,str], str, Callable]) -> Optional[ConversableAgent]:
         """Select the next agent to act based on the current state."""
-        task = message if isinstance(message, str) else message["content"]
+        if callable(message):
+            logger.error("Invalid message type: expected a string or dict. Callable not supported.")
+            return None
+        elif isinstance(message, str):
+             task = message
+        else:
+            task = message["content"]
         if len(self._task) == 0:
             self._initialize_task(task)
-
             # Verify initialization
             assert len(self._task) > 0
             assert len(self._facts) > 0
@@ -424,17 +428,13 @@ class OrchestratorAgent(ConversableAgent):
         silent: Optional[bool] = False,
         cache: Optional[AbstractCache] = None,
         max_turns: Optional[int] = None,
-        summary_method: Optional[Union[str, Callable]] = DEFAULT_SUMMARY_METHOD,
+        summary_method: Optional[Union[str, Callable]] = None,
         summary_args: Optional[dict] = {},
         message: Optional[Union[Dict, str, Callable]] = None,
         **kwargs,
     ) -> ChatResult:
         """Start the orchestration process with an initial message/task."""
         # Reset state
-
-        if isinstance(message, Callable):
-            logger.error("Invalid message type: expected a string or dict. Callable not supported.")
-            return ChatResult()
 
         self._current_round = 0
         if clear_history:
