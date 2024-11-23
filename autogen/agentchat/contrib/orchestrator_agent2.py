@@ -4,6 +4,7 @@ import traceback
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
+from autogen.cache.abstract_cache_base import AbstractCache
 from .orchestrator_prompts import (
     ORCHESTRATOR_SYSTEM_MESSAGE,
     ORCHESTRATOR_CLOSED_BOOK_PROMPT,
@@ -17,6 +18,7 @@ from .orchestrator_prompts import (
 )
 
 from autogen.agentchat import Agent, ConversableAgent, UserProxyAgent, ChatResult
+from autogen.agentchat.conversable_agent import DEFAULT_SUMMARY_METHOD
 
 logger = logging.getLogger(__name__)
 
@@ -398,9 +400,15 @@ class OrchestratorAgent(ConversableAgent):
 
     async def initiate_chat(
         self,
-        message: Optional[str] = None,
+        recipient: "ConversableAgent",
         clear_history: bool = True,
         silent: Optional[bool] = False,
+        cache: Optional[AbstractCache] = None,
+        max_turns: Optional[int] = None,
+        summary_method: Optional[Union[str, Callable]] = DEFAULT_SUMMARY_METHOD,
+        summary_args: Optional[dict] = {},
+        message: Optional[Union[Dict, str, Callable]] = None,
+        **kwargs,
     ) -> ChatResult:
         """Start the orchestration process with an initial message/task."""
         # Reset state
