@@ -68,7 +68,7 @@ class OrchestratorAgent(ConversableAgent):
             max_consecutive_auto_reply=max_consecutive_auto_reply,
             human_input_mode=human_input_mode,
             function_map=function_map,
-            code_execution_config=code_execution_config,
+            code_execution_config=False,
             llm_config=llm_config,
             default_auto_reply=default_auto_reply,
             description=description,
@@ -492,7 +492,7 @@ class OrchestratorAgent(ConversableAgent):
                 "stalls": self._stall_counter,
                 "task_completed": next_agent is None and self._current_round < self._max_rounds
             }
-            logger.info(f"Final state: {final_state}")
+            logger.info(f"Final state: {str(final_state)}")
             # Return chat result with all relevant info
             return self._oai_messages[self][-1]["content"]
 
