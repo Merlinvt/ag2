@@ -354,8 +354,8 @@ class OrchestratorAgent(ConversableAgent):
                 # generate a final message to summarize the conversation
                 final_answer = self._prepare_final_answer()
                 logger.info(
-                        f"(final answer)",
-                        f"\n{final_answer}",
+                        "(final answer)\n%s",
+                        final_answer
                 )
                 # Add final answer to chat history                                                                                         
                 self._append_oai_message({"role": "assistant", "content": final_answer}, "assistant", self, True)
@@ -542,4 +542,3 @@ class OrchestratorAgent(ConversableAgent):
                 logger.error(f"Cleaned content:\n{cleaned_content}")
                 logger.error(f"JSON error: {str(e)}")
                 raise ValueError(f"Failed to parse JSON after cleaning. Error: {str(e)}")
-
