@@ -18,12 +18,12 @@ from .orchestrator_prompts import (
 )
 
 from autogen.agentchat import Agent, ConversableAgent, UserProxyAgent, ChatResult
-from autogen.agentchat.conversable_agent import DEFAULT_SUMMARY_METHOD
 
 logger = logging.getLogger(__name__)
 
 
 class OrchestratorAgent(ConversableAgent):
+    DEFAULT_SUMMARY_METHOD = "last_msg"
     DEFAULT_SYSTEM_MESSAGES = [
         {"role": "system", "content": ORCHESTRATOR_SYSTEM_MESSAGE}
     ]
@@ -150,7 +150,7 @@ class OrchestratorAgent(ConversableAgent):
     def _get_team_names(self) -> List[str]:
         return [agent.name for agent in self._agents]
 
-    async def _initialize_task(self, task: str) -> None:
+    def _initialize_task(self, task: str) -> None:
         # called the first time a task is received
         self._task = task
         self._team_description = self._get_team_description()
@@ -163,7 +163,7 @@ class OrchestratorAgent(ConversableAgent):
         planning_conversation.append(
             {"role": "user", "content": self._get_closed_book_prompt(self._task)}
         )
-        response = await self.a_generate_reply(
+        response = self.generate_reply(
             messages=self._system_messages + planning_conversation
         )
 
@@ -178,7 +178,7 @@ class OrchestratorAgent(ConversableAgent):
         planning_conversation.append(
             {"role": "user", "content": self._get_plan_prompt(self._team_description)}
         )
-        response = await self.a_generate_reply(
+        response = self.generate_reply(
             messages=self._system_messages + planning_conversation
         )
 
@@ -186,7 +186,7 @@ class OrchestratorAgent(ConversableAgent):
         self._plan = response
 
 
-    async def _update_facts_and_plan(self) -> None:
+    def _update_facts_and_plan(self) -> None:
         # called when the orchestrator decides to replan
 
         # Shallow-copy the conversation
@@ -196,7 +196,7 @@ class OrchestratorAgent(ConversableAgent):
         planning_conversation.append(
             {"role": "user", "content": self._get_update_facts_prompt(self._task, self._facts)}
         )
-        response = await self.a_generate_reply(
+        response = self.generate_reply(
             messages=self._system_messages + planning_conversation
         )
 
@@ -210,7 +210,7 @@ class OrchestratorAgent(ConversableAgent):
         planning_conversation.append(
             {"role": "user", "content": self._get_update_plan_prompt(self._team_description)}
         )
-        response = await self.a_generate_reply(
+        response = self.generate_reply(
             messages=self._system_messages + planning_conversation
         )
 
@@ -218,7 +218,7 @@ class OrchestratorAgent(ConversableAgent):
         self._plan = response
 
 
-    async def update_ledger(self) -> Dict[str, Any]:
+    def update_ledger(self) -> Dict[str, Any]:
         # updates the ledger at each turn
         max_json_retries = 10
 
@@ -232,7 +232,7 @@ class OrchestratorAgent(ConversableAgent):
         # retries in case the LLM does not return a valid JSON
         assert max_json_retries > 0
         for _ in range(max_json_retries):
-            ledger_str = await self.a_generate_reply(
+            ledger_str = self.generate_reply(
                 messages=self._system_messages + self._oai_messages[self] + ledger_user_messages,
                 json_output=True,
             )
@@ -280,11 +280,11 @@ class OrchestratorAgent(ConversableAgent):
 
         raise ValueError("Failed to parse ledger information after multiple retries.")
 
-    async def _prepare_final_answer(self) -> str:
+    def _prepare_final_answer(self) -> str:
         # called when the task is complete
 
         final_message = {"role": "user", "content": ORCHESTRATOR_GET_FINAL_ANSWER.format(task=self._task)}
-        response = await self.a_generate_reply(
+        response = self.generate_reply(
             messages=self._system_messages + self._oai_messages[self] + [final_message]
         )
 
@@ -292,11 +292,11 @@ class OrchestratorAgent(ConversableAgent):
         return response
 
 
-    async def _select_next_agent(self, message: Union[str, Dict[str, str]]) -> Optional[ConversableAgent]:
+    def _select_next_agent(self, message: Union[str, Dict[str, str]]) -> Optional[ConversableAgent]:
         """Select the next agent to act based on the current state."""
         task = message if isinstance(message, str) else message["content"]
         if len(self._task) == 0:
-            await self._initialize_task(task)
+            self._initialize_task(task)
 
             # Verify initialization
             assert len(self._task) > 0
@@ -321,12 +321,12 @@ class OrchestratorAgent(ConversableAgent):
 
             # Share plan with all agents
             for agent in self._agents:
-                await self.a_send(synthesized_prompt, agent)
+                self.send(synthesized_prompt, agent)
 
-            return await self._select_next_agent(synthesized_prompt)
+            return self._select_next_agent(synthesized_prompt)
 
         # Orchestrate the next step
-        ledger_dict = await self.update_ledger()
+        ledger_dict = self.update_ledger()
         logger.info(
                 f"Updated Ledger:\n{json.dumps(ledger_dict, indent=2)}"
         )
@@ -338,7 +338,7 @@ class OrchestratorAgent(ConversableAgent):
             )
             if self._return_final_answer:
                 # generate a final message to summarize the conversation
-                final_answer = await self._prepare_final_answer()
+                final_answer = self._prepare_final_answer()
                 logger.info(
                         f"(final answer)",
                         f"\n{final_answer}",
@@ -371,7 +371,7 @@ class OrchestratorAgent(ConversableAgent):
                     
 
                     # Update our plan.
-                    await self._update_facts_and_plan()
+                    self._update_facts_and_plan()
 
                     # Reset chat history but preserve initial task
                     initial_task = self._oai_messages[self][0]
@@ -379,7 +379,7 @@ class OrchestratorAgent(ConversableAgent):
                     
                     # Reset all agents
                     for agent in self._agents:
-                        await agent.reset()
+                        agent.reset()
                     # Send everyone the NEW plan
                     synthesized_prompt = self._get_synthesize_prompt(
                         self._task, self._team_description, self._facts, self._plan
@@ -387,7 +387,7 @@ class OrchestratorAgent(ConversableAgent):
                     
                     # Share new plan with all agents
                     for agent in self._agents:
-                        await self.a_send(synthesized_prompt, agent)
+                        self.send(synthesized_prompt, agent)
 
                     logger.info(
                             f"(thought) New plan:\n{synthesized_prompt}"
@@ -397,7 +397,7 @@ class OrchestratorAgent(ConversableAgent):
                     self._append_oai_message(synthesized_message, "assistant", self, True)
 
                     # Answer from this synthesized message
-                    return await self._select_next_agent(synthesized_prompt)
+                    return self._select_next_agent(synthesized_prompt)
 
         # Select next agent and send instruction
         next_agent_name = ledger_dict["next_speaker"]["answer"]
@@ -412,12 +412,12 @@ class OrchestratorAgent(ConversableAgent):
                 self._append_oai_message({"role": "assistant", "content": instruction}, "assistant", self, True)
                 
                 # Send instruction directly to the agent
-                await self.a_send(instruction, agent)
+                self.send(instruction, agent)
                 return agent
 
         return None
 
-    async def initiate_chat(
+    def initiate_chat(
         self,
         recipient: "ConversableAgent",
         clear_history: bool = True,
@@ -431,6 +431,11 @@ class OrchestratorAgent(ConversableAgent):
     ) -> ChatResult:
         """Start the orchestration process with an initial message/task."""
         # Reset state
+
+        if isinstance(message, Callable):
+            logger.error("Invalid message type: expected a string or dict. Callable not supported.")
+            return ChatResult()
+
         self._current_round = 0
         if clear_history:
             self._oai_messages.clear()
@@ -438,10 +443,10 @@ class OrchestratorAgent(ConversableAgent):
                 agent.reset()
             
         if message is None:
-            message = await self.a_get_human_input("Please provide the task: ")
+            message = self.get_human_input("Please provide the task: ")
             
         # Initialize the first agent selection
-        next_agent = await self._select_next_agent(message)
+        next_agent = self._select_next_agent(message)
         
         last_summary = ""
         # Continue orchestration until max rounds reached or no next agent
@@ -449,7 +454,7 @@ class OrchestratorAgent(ConversableAgent):
             self._current_round += 1
             
             # Get response through executor agent
-            chat_result = await self.executor.a_initiate_chat(
+            chat_result = self.executor.initiate_chat(
                 recipient=next_agent,
                 message=self._oai_messages[self][-1]["content"],
                 clear_history=False # true ?
@@ -465,15 +470,15 @@ class OrchestratorAgent(ConversableAgent):
                 self._append_oai_message({"role": "user", "content": response}, "user", self, False)
                 
                 # Select next agent based on response
-                next_agent = await self._select_next_agent(response)
+                next_agent = self._select_next_agent(response)
                 
             if self._current_round >= self._max_rounds:
                 logger.info(f"Max rounds ({self._max_rounds}) reached. Terminating.")
                 
         # Return chat result with all relevant info
+        # TODO: cost not implemented
         return ChatResult(
             chat_history=self._oai_messages[self],
             summary=last_summary, 
-            cost=None,     # not implemented
             human_input=self._human_input
         )
