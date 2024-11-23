@@ -35,7 +35,10 @@ class OrchestratorAgent(ConversableAgent):
         max_consecutive_auto_reply: Optional[int] = None,
         human_input_mode: Literal["ALWAYS", "NEVER", "TERMINATE"] = "TERMINATE",
         function_map: Optional[Dict[str, Callable]] = None,
-        code_execution_config: Union[Dict, Literal[False]] = False,
+        code_execution_config: Union[Dict, Literal[False]] = {
+            "work_dir": "coding",
+            "use_docker": False,
+        },
         llm_config: Optional[Union[Dict, Literal[False]]] = None,
         default_auto_reply: Union[str, Dict] = "",
         description: Optional[str] = None,
@@ -54,6 +57,7 @@ class OrchestratorAgent(ConversableAgent):
         max_stalls_before_replan: int = 3,
         max_replans: int = 3,
         return_final_answer: bool = False,
+        user_agent: Optional[UserProxyAgent] = None,
         **kwargs
     ):
         super().__init__(
@@ -89,6 +93,21 @@ class OrchestratorAgent(ConversableAgent):
         if self not in self._oai_messages:
             self._oai_messages[self] = []
         self._agents = agents if agents is not None else []
+        
+        # Create executor agent for code execution
+        if user_agent:
+            self.executor = user_agent
+        else:
+            self.executor = UserProxyAgent(
+                name="executor",
+                llm_config=llm_config,
+                is_termination_msg=lambda x: x.get("content", "").find("TERMINATE") >= 0,
+                max_consecutive_auto_reply=10,
+                human_input_mode="NEVER",
+                description="Executor agent that executes code and reports results. Returns TERMINATE when task is complete.",
+                code_execution_config=code_execution_config
+            )
+            
         self._should_replan = True
         self._max_stalls_before_replan = max_stalls_before_replan
         self._stall_counter = 0
@@ -424,14 +443,24 @@ class OrchestratorAgent(ConversableAgent):
         # Initialize the first agent selection
         next_agent = await self._select_next_agent(message)
         
+        last_summary = ""
         # Continue orchestration until max rounds reached or no next agent
         while next_agent is not None and self._current_round < self._max_rounds:
             self._current_round += 1
             
-            # Get response from current agent
-            response = await next_agent.a_generate_reply(sender=self)
+            # Get response through executor agent
+            chat_result = await self.executor.a_initiate_chat(
+                recipient=next_agent,
+                message=self._oai_messages[self][-1]["content"],
+                clear_history=False # true ?
+            )
             
-            if response:
+            if chat_result and chat_result.summary:
+                last_summary = chat_result.summary
+            if chat_result and chat_result.chat_history:
+                # Get the last message from the chat history
+                response = chat_result.chat_history[-1]["content"]
+                
                 # Add response to chat history
                 self._append_oai_message({"role": "user", "content": response}, "user", self, False)
                 
@@ -444,7 +473,7 @@ class OrchestratorAgent(ConversableAgent):
         # Return chat result with all relevant info
         return ChatResult(
             chat_history=self._oai_messages[self],
-            summary=None,  # Could add summary generation if needed
-            cost=None,     # Could track costs if needed
+            summary=last_summary, 
+            cost=None,     # not implemented
             human_input=self._human_input
         )
