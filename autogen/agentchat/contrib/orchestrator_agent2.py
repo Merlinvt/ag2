@@ -291,15 +291,15 @@ class OrchestratorAgent(ConversableAgent):
         return response
 
 
-    def _select_next_agent(self, message: Union[Dict[str,str], str, Callable]) -> Optional[ConversableAgent]:
+    def _select_next_agent(self, message: Union[Dict[str,str], str]) -> Optional[ConversableAgent]:
         """Select the next agent to act based on the current state."""
-        if callable(message):
-            logger.error("Invalid message type: expected a string or dict. Callable not supported.")
-            return None
-        elif isinstance(message, str):
-             task = message
+        if isinstance(message, str):
+            task = message
+        elif isinstance(message, dict):
+            task = message.get("content", "")
         else:
-            task = message["content"]
+            logger.error(f"Invalid message type: {type(message)}. Expected string or dict.")
+            return None
         if len(self._task) == 0:
             self._initialize_task(task)
             # Verify initialization
@@ -323,10 +323,7 @@ class OrchestratorAgent(ConversableAgent):
             # Add to chat history
             self._append_oai_message({"role": "assistant", "content": synthesized_prompt}, "assistant", self, True)
 
-            # Share plan with all agents
-            for agent in self._agents:
-                self.send(synthesized_prompt, agent)
-
+            # Add initial plan to chat history only
             return self._select_next_agent(synthesized_prompt)
 
         # Orchestrate the next step
@@ -453,11 +450,17 @@ class OrchestratorAgent(ConversableAgent):
         while next_agent is not None and self._current_round < self._max_rounds:
             self._current_round += 1
             
-            # Get response through executor agent
+            # Get the last message from chat history
+            last_message = self._oai_messages[self][-1] if self._oai_messages[self] else None
+            if not last_message:
+                logger.error("No message found in chat history")
+                break
+                
+            # Execute through executor agent
             chat_result = self.executor.initiate_chat(
                 recipient=next_agent,
-                message=self._oai_messages[self][-1]["content"],
-                clear_history=False # true ?
+                message=last_message,  # Pass full message dict
+                clear_history=True  # Clear history each time to avoid context pollution
             )
             
             if chat_result and chat_result.summary:
@@ -475,10 +478,19 @@ class OrchestratorAgent(ConversableAgent):
             if self._current_round >= self._max_rounds:
                 logger.info(f"Max rounds ({self._max_rounds}) reached. Terminating.")
                 
+        # Track final state
+        final_state = {
+            "rounds_completed": self._current_round,
+            "replans": self._replan_counter,
+            "stalls": self._stall_counter,
+            "task_completed": next_agent is None and self._current_round < self._max_rounds
+        }
+        
         # Return chat result with all relevant info
-        # TODO: cost not implemented
         return ChatResult(
             chat_history=self._oai_messages[self],
-            summary=last_summary, 
-            human_input=self._human_input
+            summary=last_summary,
+            human_input=self._human_input,
+            cost=None,  # TODO: Implement cost tracking
+            state=final_state
         )
